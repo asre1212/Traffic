@@ -1,0 +1,20 @@
+{
+  "name": "commute-pwa",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Weekday 6am commute traffic alerts on the iPhone lock screen, as an installable PWA backed by a Cloudflare Worker.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "keys": "node scripts/generate-vapid-keys.mjs",
+    "icons": "python3 scripts/make-icons.py",
+    "db:init": "wrangler d1 execute commute --remote --file=./schema.sql",
+    "db:init:local": "wrangler d1 execute commute --local --file=./schema.sql",
+    "tail": "wrangler tail",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.20.0"
+  }
+}
