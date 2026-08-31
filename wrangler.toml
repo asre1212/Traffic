@@ -1,0 +1,30 @@
+name = "commute"
+main = "worker/src/index.js"
+compatibility_date = "2025-05-05"
+
+# Static PWA shell (index.html, sw.js, manifest, icons) is served straight from
+# the edge; only /api/* is handled by the Worker script.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+# Every 10 minutes. The Worker itself decides whether any device is inside its
+# local alert window (default weekdays 06:00-06:50), so this stays cheap.
+[triggers]
+crons = ["*/10 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "commute"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+[vars]
+# Public VAPID key (safe to expose - the browser needs it to subscribe).
+VAPID_PUBLIC_KEY = ""
+# mailto: or https: contact, required by the Web Push spec.
+VAPID_SUBJECT = "mailto:you@example.com"
+
+# Secrets (set with `wrangler secret put <NAME>`):
+#   VAPID_PRIVATE_KEY  - base64url raw P-256 private scalar, from `npm run keys`
+#   TOMTOM_API_KEY     - https://developer.tomtom.com (free tier: 2500 req/day)

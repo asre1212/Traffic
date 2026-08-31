@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Commute</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="description" content="Weekday drive times and accident alerts for your route, on the lock screen at 6am.">
+<meta name="theme-color" content="#0b1020">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Commute">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/icon-180.png">
+<link rel="icon" href="/icons/icon-192.png">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<header class="bar">
+  <h1>Commute</h1>
+  <button id="refresh" class="ghost" type="button" aria-label="Refresh drive times">↻</button>
+</header>
+
+<!-- Shown until the app is installed to the Home Screen: iOS only allows push there. -->
+<section id="install-hint" class="card accent" hidden>
+  <h2>Add to Home Screen first</h2>
+  <p>iPhone only delivers lock-screen alerts to installed web apps. In Safari tap
+    <b>Share</b> → <b>Add to Home Screen</b>, then open Commute from the icon.</p>
+</section>
+
+<main id="tab-today" class="tab">
+  <div id="status" class="status" hidden></div>
+  <div id="routes-live" class="stack"></div>
+  <p id="empty-live" class="muted center" hidden>No routes yet. Open <b>Routes</b> to add one.</p>
+
+  <section class="card">
+    <h2>Lock-screen alerts</h2>
+    <p id="alert-state" class="muted">Checking…</p>
+    <div class="row">
+      <button id="enable-push" class="primary" type="button">Enable alerts</button>
+      <button id="test-push" class="ghost" type="button">Send test</button>
+    </div>
+  </section>
+</main>
+
+<main id="tab-routes" class="tab" hidden>
+  <div id="route-list" class="stack"></div>
+  <button id="add-route" class="primary wide" type="button">New route</button>
+</main>
+
+<main id="tab-settings" class="tab" hidden>
+  <section class="card">
+    <h2>Alert window</h2>
+    <label class="field"><span>From</span><input id="set-start" type="time" step="300" value="06:00"></label>
+    <label class="field"><span>Until</span><input id="set-end" type="time" step="300" value="06:50"></label>
+    <p class="muted small">Alerts are sent inside this window only, and cleared from the lock screen when it ends.</p>
+    <div class="days" id="set-days" role="group" aria-label="Days"></div>
+    <label class="field"><span>Refresh every</span>
+      <select id="set-refresh">
+        <option value="10">10 min</option><option value="15">15 min</option>
+        <option value="20" selected>20 min</option><option value="30">30 min</option>
+      </select>
+    </label>
+    <label class="field"><span>Time zone</span><input id="set-tz" type="text" inputmode="text" autocapitalize="off" spellcheck="false"></label>
+  </section>
+
+  <section class="card">
+    <h2>What counts as bad</h2>
+    <label class="field"><span>Flag delays over</span>
+      <select id="set-threshold">
+        <option value="3">3 min</option><option value="5" selected>5 min</option>
+        <option value="10">10 min</option><option value="15">15 min</option>
+      </select>
+    </label>
+    <label class="check"><input id="set-quiet" type="checkbox" checked>
+      <span>Alert every morning, even when roads are clear</span></label>
+    <label class="field"><span>Units</span>
+      <select id="set-units"><option value="imperial">Miles</option><option value="metric">Kilometres</option></select>
+    </label>
+    <label class="check"><input id="set-enabled" type="checkbox" checked><span>Morning alerts on</span></label>
+  </section>
+
+  <section class="card">
+    <h2>Status</h2>
+    <p id="diag" class="muted small">…</p>
+    <button id="save-settings" class="primary wide" type="button">Save settings</button>
+  </section>
+</main>
+
+<nav class="tabbar" role="tablist">
+  <button class="tabbtn on" data-tab="today" role="tab">Today</button>
+  <button class="tabbtn" data-tab="routes" role="tab">Routes</button>
+  <button class="tabbtn" data-tab="settings" role="tab">Settings</button>
+</nav>
+
+<!-- Route editor -->
+<dialog id="editor">
+  <form method="dialog" id="editor-form">
+    <header class="bar">
+      <button value="cancel" class="ghost" type="submit">Cancel</button>
+      <h2 id="editor-title">Route</h2>
+      <button id="save-route" class="ghost strong" type="button">Save</button>
+    </header>
+    <label class="field"><span>Name</span><input id="route-name" maxlength="40" placeholder="Home → Work" required></label>
+    <div id="points" class="stack points"></div>
+    <button id="add-waypoint" class="ghost wide" type="button">+ Add waypoint</button>
+    <label class="check"><input id="route-active" type="checkbox" checked><span>Include in morning alert</span></label>
+    <fieldset class="avoid">
+      <legend>Avoid</legend>
+      <label class="chip"><input type="checkbox" value="tollRoads"><span>Tolls</span></label>
+      <label class="chip"><input type="checkbox" value="motorways"><span>Highways</span></label>
+      <label class="chip"><input type="checkbox" value="ferries"><span>Ferries</span></label>
+    </fieldset>
+    <div class="row">
+      <button id="preview-route" class="ghost" type="button">Check now</button>
+      <button id="delete-route" class="ghost danger" type="button" hidden>Delete</button>
+    </div>
+    <p id="editor-msg" class="muted small"></p>
+  </form>
+</dialog>
+
+<!-- Place picker -->
+<dialog id="picker">
+  <header class="bar">
+    <button id="picker-cancel" class="ghost" type="button">Cancel</button>
+    <h2 id="picker-title">Search</h2>
+    <button id="picker-here" class="ghost" type="button">Use GPS</button>
+  </header>
+  <input id="picker-q" type="search" placeholder="Address, place or lat,lon" autocomplete="off" enterkeyhint="search">
+  <ul id="picker-results" class="results"></ul>
+  <p id="picker-msg" class="muted small"></p>
+</dialog>
+
+<script src="/app.js" type="module"></script>
+</body>
+</html>
