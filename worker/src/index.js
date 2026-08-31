@@ -2,6 +2,7 @@
 // 6am commute alert to the lock screen.
 
 import { buildAlert, buildSweep } from './alerts.js';
+import { callsForRoutes, createBudget } from './budget.js';
 import { sendPush } from './push.js';
 import { epochMinute, localParts, parseHhMm, tickAction } from './schedule.js';
 import { checkRoute, reverseGeocode, searchPlaces } from './traffic.js';
@@ -25,8 +26,33 @@ function windowEndInstant(device, now = new Date()) {
   return new Date(now.getTime() + minutesLeft * 60000).toISOString();
 }
 
-async function runRoutes(env, device, routes) {
-  return Promise.all(routes.map((r) => checkRoute(r, env, { units: device.units })));
+/** How long a cached check is served before the provider is asked again. */
+const CACHE_FRESH_MS = 3 * 60 * 1000;
+const CACHE_FLOOR_MS = 45 * 1000;   // even a forced refresh honours this
+
+async function runRoutes(env, device, routes, budget) {
+  return Promise.all(routes.map((r) => checkRoute(r, env, { units: device.units, budget })));
+}
+
+/**
+ * Route checks with the free-tier guard applied: refuses up front when the
+ * day's allowance cannot cover the batch, and records what was spent.
+ */
+async function checkWithBudget(env, device, routes) {
+  const budget = await createBudget(env).load();
+  if (!budget.canAfford(callsForRoutes(routes.length))) {
+    const message = `Daily traffic-API budget reached (${budget.limit} calls). It resets at 00:00 UTC.`;
+    return {
+      budget,
+      exhausted: true,
+      results: routes.map((r) => ({ routeId: r.id, name: r.name, ok: false, error: message })),
+    };
+  }
+  try {
+    return { budget, exhausted: false, results: await runRoutes(env, device, routes, budget) };
+  } finally {
+    await budget.flush();
+  }
 }
 
 async function pushTo(env, device, payload, options) {
@@ -67,7 +93,12 @@ async function handleApi(request, env) {
   if (!device) return fail('unknown device - reinstall the app to re-register', 401);
 
   if (path === '/api/state' && method === 'GET') {
-    return json({ settings: store.publicSettings(device), routes: await store.listRoutes(env, device.id) });
+    const budget = await createBudget(env).load();
+    return json({
+      settings: store.publicSettings(device),
+      routes: await store.listRoutes(env, device.id),
+      usage: { used: budget.used, limit: budget.limit, remaining: budget.remaining, resetsAt: `${budget.day} 24:00 UTC` },
+    });
   }
 
   if (path === '/api/settings' && (method === 'PATCH' || method === 'PUT')) {
@@ -113,7 +144,7 @@ async function handleApi(request, env) {
 
   if (path === '/api/push/test' && method === 'POST') {
     const routes = await store.listRoutes(env, device.id, { activeOnly: true });
-    const results = await runRoutes(env, device, routes);
+    const { results } = await checkWithBudget(env, device, routes);
     const built = routes.length
       ? buildAlert(results, { ...device, quiet_ok: 1 }, { windowEndsAt: windowEndInstant(device) })
       : { payload: { kind: 'alert', tag: 'commute', title: '🚗 Test alert', body: 'Add a route to see live drive times here.' } };
@@ -124,10 +155,31 @@ async function handleApi(request, env) {
 
   if (path === '/api/check' && method === 'GET') {
     const routeId = url.searchParams.get('routeId');
+    const forced = url.searchParams.get('force') === '1';
     let routes = await store.listRoutes(env, device.id, { activeOnly: !routeId });
     if (routeId) routes = routes.filter((r) => r.id === routeId);
-    const results = await runRoutes(env, device, routes);
-    return json({ results, checkedAt: new Date().toISOString() });
+
+    // Reopening the app, or tapping refresh twice, must not spend the allowance.
+    const cached = routeId ? null : store.cachedCheck(device);
+    const age = cached ? Date.now() - cached.at : Infinity;
+    if (cached && age < (forced ? CACHE_FLOOR_MS : CACHE_FRESH_MS)) {
+      return json({
+        results: cached.results,
+        checkedAt: new Date(cached.at).toISOString(),
+        cached: true,
+        ageSeconds: Math.round(age / 1000),
+      });
+    }
+
+    const { results, budget, exhausted } = await checkWithBudget(env, device, routes);
+    const at = Date.now();
+    if (!routeId && !exhausted) await store.saveCheck(env, device.id, results, at);
+    return json({
+      results,
+      checkedAt: new Date(at).toISOString(),
+      cached: false,
+      usage: { used: budget.used, limit: budget.limit, remaining: budget.remaining },
+    });
   }
 
   if (path === '/api/preview' && method === 'POST') {
@@ -135,9 +187,13 @@ async function handleApi(request, env) {
     const body = await readJson(request);
     try {
       const points = store.parsePoints(body.points);
-      const result = await checkRoute({ id: 'preview', name: body.name || 'Preview', points, avoid: body.avoid },
-        env, { units: device.units });
-      return json({ result });
+      const budget = await createBudget(env).load();
+      if (!budget.canAfford(2)) return fail(`Daily traffic-API budget reached (${budget.limit} calls)`, 429);
+      try {
+        const result = await checkRoute({ id: 'preview', name: body.name || 'Preview', points, avoid: body.avoid },
+          env, { units: device.units, budget });
+        return json({ result });
+      } finally { await budget.flush(); }
     } catch (err) { return fail(err.message); }
   }
 
@@ -145,14 +201,18 @@ async function handleApi(request, env) {
     const q = (url.searchParams.get('q') || '').trim();
     if (q.length < 3) return json({ results: [] });
     if (!env.TOMTOM_API_KEY) return fail('TOMTOM_API_KEY is not configured', 503);
+    const budget = await createBudget(env).load();
+    if (!budget.canAfford(1)) return fail(`Daily traffic-API budget reached (${budget.limit} calls)`, 429);
     try {
       return json({
         results: await searchPlaces(q, env, {
           lat: Number(url.searchParams.get('lat')),
           lon: Number(url.searchParams.get('lon')),
+          budget,
         }),
       });
     } catch (err) { return fail(err.message, 502); }
+    finally { await budget.flush(); }
   }
 
   if (path === '/api/reverse' && method === 'GET') {
@@ -160,8 +220,11 @@ async function handleApi(request, env) {
     const lon = Number(url.searchParams.get('lon'));
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return fail('lat and lon are required');
     if (!env.TOMTOM_API_KEY) return fail('TOMTOM_API_KEY is not configured', 503);
-    try { return json({ place: await reverseGeocode(lat, lon, env) }); }
+    const budget = await createBudget(env).load();
+    if (!budget.canAfford(1)) return fail(`Daily traffic-API budget reached (${budget.limit} calls)`, 429);
+    try { return json({ place: await reverseGeocode(lat, lon, env, budget) }); }
     catch (err) { return fail(err.message, 502); }
+    finally { await budget.flush(); }
   }
 
   return fail('not found', 404);
@@ -190,7 +253,12 @@ async function tickDevice(env, device, now) {
     return { device: device.id, action: 'idle', reason: 'no active routes' };
   }
 
-  const results = await runRoutes(env, device, routes);
+  const { results, exhausted } = await checkWithBudget(env, device, routes);
+  if (exhausted) {
+    await store.markRun(env, device.id, minute, 'skipped: daily traffic-API budget reached');
+    return { device: device.id, action: 'skip', reason: 'budget exhausted' };
+  }
+  await store.saveCheck(env, device.id, results, now.getTime());
   const built = buildAlert(results, device, { windowEndsAt: windowEndInstant(device, now) });
   if (built.skip) {
     await store.markRun(env, device.id, minute, `skipped: ${built.skip}`);

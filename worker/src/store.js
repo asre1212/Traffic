@@ -18,12 +18,13 @@ const randomToken = () => {
   return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
 };
 
-export async function createDevice(env, { tz = 'America/New_York' } = {}) {
+export async function createDevice(env, { tz } = {}) {
+  const zone = VALID_TZ(tz) ? tz : 'America/New_York';
   const id = crypto.randomUUID();
   const token = randomToken();
   await env.DB.prepare(
     'INSERT INTO devices (id, token_hash, created_at, tz) VALUES (?, ?, ?, ?)',
-  ).bind(id, await sha256hex(token), Date.now(), tz).run();
+  ).bind(id, await sha256hex(token), Date.now(), zone).run();
   return { deviceId: id, token };
 }
 
@@ -96,7 +97,10 @@ export async function deleteRoute(env, deviceId, id) {
   return res.meta.changes > 0;
 }
 
+// Note: Intl treats `undefined` as "use the runtime default" rather than
+// rejecting it, so an omitted time zone has to be screened out explicitly.
 const VALID_TZ = (tz) => {
+  if (typeof tz !== 'string' || !tz.trim()) return false;
   try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; }
 };
 
@@ -111,16 +115,31 @@ export async function updateSettings(env, device, body) {
     quiet_ok: bool(body?.quietOk, device.quiet_ok),
     delay_threshold: clamp(body?.delayThreshold, 1, 60, device.delay_threshold),
     units: body?.units === 'metric' || body?.units === 'imperial' ? body.units : device.units,
+    snooze_until: parseSnooze(body?.snoozeUntil, device.snooze_until),
   };
   if (parseHhMm(next.window_end, 0) <= parseHhMm(next.window_start, 0)) {
     throw new Error('the end of the window must be after the start');
   }
   await env.DB.prepare(
     `UPDATE devices SET tz=?, window_start=?, window_end=?, days=?, refresh_min=?, enabled=?,
-     quiet_ok=?, delay_threshold=?, units=? WHERE id=?`,
+     quiet_ok=?, delay_threshold=?, units=?, snooze_until=? WHERE id=?`,
   ).bind(next.tz, next.window_start, next.window_end, next.days, next.refresh_min, next.enabled,
-    next.quiet_ok, next.delay_threshold, next.units, device.id).run();
+    next.quiet_ok, next.delay_threshold, next.units, next.snooze_until, device.id).run();
   return { ...device, ...next };
+}
+
+/**
+ * "Pause until" for holidays. The phone sends the resume instant (it knows its
+ * own clock); null or a past date clears the pause. Capped at a year so a bad
+ * value cannot mute alerts forever.
+ */
+export function parseSnooze(value, fallback = 0) {
+  if (value === null || value === '' || value === false) return 0;
+  if (value === undefined) return Number(fallback) || 0;
+  const ms = typeof value === 'number' ? value : Date.parse(value);
+  if (!Number.isFinite(ms)) return Number(fallback) || 0;
+  const maxMs = Date.now() + 365 * 24 * 3600 * 1000;
+  return ms <= Date.now() ? 0 : Math.min(ms, maxMs);
 }
 
 const fmt = (mins) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
@@ -174,4 +193,20 @@ export const publicSettings = (d) => ({
   units: d.units,
   subscribed: !!d.sub_endpoint,
   lastStatus: d.last_status,
+  snoozeUntil: Number(d.snooze_until) > Date.now() ? new Date(Number(d.snooze_until)).toISOString() : null,
+  paused: Number(d.snooze_until) > Date.now(),
+  lastCheckedAt: Number(d.last_check_ms) ? new Date(Number(d.last_check_ms)).toISOString() : null,
 });
+
+/** Cache the latest check so reopening the app is free. */
+export async function saveCheck(env, deviceId, results, at = Date.now()) {
+  await env.DB.prepare('UPDATE devices SET last_check_ms = ?, last_results = ? WHERE id = ?')
+    .bind(at, JSON.stringify(results), deviceId).run();
+}
+
+export function cachedCheck(device) {
+  if (!device.last_results) return null;
+  try {
+    return { results: JSON.parse(device.last_results), at: Number(device.last_check_ms) || 0 };
+  } catch { return null; }
+}

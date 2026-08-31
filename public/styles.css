@@ -121,6 +121,23 @@ input[type="search"], #route-name { text-align: left; width: 100%; }
 .points .pick.empty { color: var(--muted); }
 .points .drop { flex: 0 0 auto; padding: 11px; width: 44px; }
 
+/* Master on/off switch */
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.switch-row h2 { margin: 0 0 2px; }
+.switch {
+  flex: 0 0 auto; width: 56px; min-height: 32px; height: 32px; padding: 0;
+  border-radius: 999px; border: 1px solid var(--line); background: #2a3252;
+  position: relative; transition: background 0.15s ease;
+}
+.switch span {
+  position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%;
+  background: #fff; transition: transform 0.15s ease;
+}
+.switch[aria-checked="true"] { background: var(--ok); border-color: var(--ok); }
+.switch[aria-checked="true"] span { transform: translateX(24px); }
+.pauses button { font-size: 13px; padding: 9px 6px; }
+#master-card.paused { border-color: var(--warn); }
+
 /* Tab bar */
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 4px;

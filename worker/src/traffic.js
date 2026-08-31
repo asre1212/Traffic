@@ -22,10 +22,18 @@ const INCIDENT_FIELDS =
 
 class ProviderError extends Error {}
 
-async function getJson(url, label) {
+/**
+ * Every provider call goes through the budget, which enforces the free tier's
+ * daily allowance and per-second pacing before the request leaves the Worker.
+ */
+async function getJson(url, label, budget) {
+  if (budget) await budget.claim();
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
   if (!res.ok) {
     const detail = (await res.text().catch(() => '')).slice(0, 200);
+    if (res.status === 403 && /over the limit/i.test(detail)) {
+      throw new ProviderError(`${label} refused: the provider's daily free allowance is used up`);
+    }
     throw new ProviderError(`${label} failed (${res.status}): ${detail}`);
   }
   return res.json();
@@ -97,11 +105,24 @@ function describeIncident(feature) {
   };
 }
 
-async function fetchIncidents(points, env) {
+/**
+ * Route geometry can run to thousands of points. The spatial hash only needs
+ * enough of them to cover the road, and the free plan gives each invocation
+ * 10 ms of CPU, so thin dense geometry down first.
+ */
+function decimate(points, max = 1200) {
+  if (points.length <= max) return points;
+  const step = Math.ceil(points.length / max);
+  const out = points.filter((_, i) => i % step === 0);
+  if (out.at(-1) !== points.at(-1)) out.push(points.at(-1));
+  return out;
+}
+
+async function fetchIncidents(points, env, budget) {
   const bbox = boundingBox(points).join(',');
   const url = `${INCIDENTS}?key=${env.TOMTOM_API_KEY}&bbox=${bbox}` +
     `&fields=${encodeURIComponent(INCIDENT_FIELDS)}&language=en-GB&timeValidityFilter=present`;
-  const data = await getJson(url, 'Incident lookup');
+  const data = await getJson(url, 'Incident lookup', budget);
 
   const index = routeIndex(points);
   const seen = new Set();
@@ -127,7 +148,7 @@ async function fetchIncidents(points, env) {
  * @returns normalized summary; `error` is set instead of throwing so one bad
  *          route never takes down the whole morning alert.
  */
-export async function checkRoute(route, env, { departAt = 'now', units = 'imperial' } = {}) {
+export async function checkRoute(route, env, { departAt = 'now', units = 'imperial', budget = null } = {}) {
   const base = { routeId: route.id, name: route.name, checkedAt: new Date().toISOString() };
   try {
     if (!env.TOMTOM_API_KEY) throw new ProviderError('TOMTOM_API_KEY is not configured');
@@ -147,7 +168,7 @@ export async function checkRoute(route, env, { departAt = 'now', units = 'imperi
     });
     if (route.avoid) params.set('avoid', route.avoid); // e.g. tollRoads,motorways
 
-    const data = await getJson(`${ROUTING}/${locations}/json?${params}`, 'Route lookup');
+    const data = await getJson(`${ROUTING}/${locations}/json?${params}`, 'Route lookup', budget);
     const best = data.routes?.[0];
     if (!best) throw new ProviderError('no route found between those points');
 
@@ -155,13 +176,13 @@ export async function checkRoute(route, env, { departAt = 'now', units = 'imperi
     const live = s.travelTimeInSeconds;
     // Prefer the typical-for-this-time-of-day baseline; fall back to free flow.
     const baseline = s.historicTrafficTravelTimeInSeconds || s.noTrafficTravelTimeInSeconds || live;
-    const points = (best.legs || []).flatMap((leg) =>
-      (leg.points || []).map((p) => ({ lat: p.latitude, lon: p.longitude })));
+    const points = decimate((best.legs || []).flatMap((leg) =>
+      (leg.points || []).map((p) => ({ lat: p.latitude, lon: p.longitude }))));
 
     let incidents = [];
     let incidentError = null;
     try {
-      incidents = await fetchIncidents(points.length ? points : pts, env);
+      incidents = await fetchIncidents(points.length ? points : pts, env, budget);
     } catch (err) {
       incidentError = err.message; // travel time is still useful without incident data
     }
@@ -196,14 +217,14 @@ export async function checkRoute(route, env, { departAt = 'now', units = 'imperi
 }
 
 /** Typeahead for the route editor. Keeps the API key server-side. */
-export async function searchPlaces(query, env, { lat, lon, limit = 6 } = {}) {
+export async function searchPlaces(query, env, { lat, lon, limit = 6, budget = null } = {}) {
   const params = new URLSearchParams({ key: env.TOMTOM_API_KEY, limit: String(limit), typeahead: 'true' });
   if (Number.isFinite(lat) && Number.isFinite(lon)) {
     params.set('lat', String(lat));
     params.set('lon', String(lon));
     params.set('radius', '150000');
   }
-  const data = await getJson(`${SEARCH}/search/${encodeURIComponent(query)}.json?${params}`, 'Place search');
+  const data = await getJson(`${SEARCH}/search/${encodeURIComponent(query)}.json?${params}`, 'Place search', budget);
   return (data.results || []).map((r) => ({
     label: r.poi?.name ? `${r.poi.name}, ${r.address?.freeformAddress || ''}`.replace(/,\s*$/, '') : r.address?.freeformAddress || 'Unnamed',
     lat: r.position.lat,
@@ -212,9 +233,9 @@ export async function searchPlaces(query, env, { lat, lon, limit = 6 } = {}) {
 }
 
 /** "Use my current location" -> a human label. */
-export async function reverseGeocode(lat, lon, env) {
+export async function reverseGeocode(lat, lon, env, budget = null) {
   const params = new URLSearchParams({ key: env.TOMTOM_API_KEY });
-  const data = await getJson(`${SEARCH}/reverseGeocode/${lat},${lon}.json?${params}`, 'Reverse geocode');
+  const data = await getJson(`${SEARCH}/reverseGeocode/${lat},${lon}.json?${params}`, 'Reverse geocode', budget);
   const a = data.addresses?.[0]?.address;
   return { label: a?.freeformAddress || `${lat.toFixed(4)}, ${lon.toFixed(4)}`, lat, lon };
 }

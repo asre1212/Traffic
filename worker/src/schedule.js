@@ -61,6 +61,7 @@ export function tickAction(device, now = new Date(), toleranceMin = 5) {
   const base = { local, start, end, reason: '' };
 
   if (!device.enabled) return { ...base, action: 'idle', reason: 'disabled' };
+  if (Number(device.snooze_until) > now.getTime()) return { ...base, action: 'idle', reason: 'paused' };
   if (!device.sub_endpoint) return { ...base, action: 'idle', reason: 'no subscription' };
   if (!days.includes(local.isoDay)) return { ...base, action: 'idle', reason: 'not an alert day' };
 

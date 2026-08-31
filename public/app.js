@@ -15,6 +15,7 @@ const state = {
   settings: null,
   routes: [],
   results: [],
+  usage: null,       // traffic-API calls used today, against the free-tier budget
   editing: null,     // route draft while the editor is open
 };
 
@@ -62,6 +63,60 @@ function status(message, kind = '') {
 
 const isStandalone = () => window.navigator.standalone === true ||
   window.matchMedia('(display-mode: standalone)').matches;
+
+/* --------------------------------------- master switch & holiday pause --- */
+
+const DATE_FMT = { weekday: 'short', day: 'numeric', month: 'short' };
+
+/** Local midnight `days` from now - "paused until Monday" means alerts resume that morning. */
+function localMidnightIn(days) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function renderMaster() {
+  const s = state.settings;
+  if (!s) return;
+  const paused = Boolean(s.snoozeUntil) && new Date(s.snoozeUntil) > new Date();
+  const on = s.enabled && !paused;
+
+  $('#master-toggle').setAttribute('aria-checked', String(on));
+  $('#master-card').classList.toggle('paused', paused);
+  $('#resume').hidden = !paused;
+  for (const button of document.querySelectorAll('.pauses button')) button.disabled = !s.enabled;
+
+  $('#master-sub').textContent = !s.enabled
+    ? 'Off. No alerts until you switch this back on.'
+    : paused
+      ? `Paused until ${new Date(s.snoozeUntil).toLocaleDateString([], DATE_FMT)} — nothing will be sent before then.`
+      : `${s.days.map((d) => DAY_LABELS[d - 1]).join(' ')} · ${s.windowStart}–${s.windowEnd}`;
+}
+
+async function patchSettings(body, note) {
+  try {
+    const { settings } = await api('/api/settings', { method: 'PATCH', body });
+    state.settings = settings;
+    renderMaster();
+    fillSettings(settings);
+    renderAlertState(await pushState());
+    if (note) status(note, 'good');
+    // Nothing should be left on the lock screen once alerts are off or paused.
+    if (!settings.enabled || settings.paused) {
+      const registration = await navigator.serviceWorker?.getRegistration();
+      registration?.active?.postMessage({ type: 'clear-notifications' });
+    }
+  } catch (err) {
+    status(err.message, 'err');
+  }
+}
+
+async function pauseFor(days) {
+  const until = localMidnightIn(days);
+  await patchSettings({ snoozeUntil: until.toISOString(), enabled: true },
+    `Paused until ${until.toLocaleDateString([], DATE_FMT)}`);
+}
 
 /* --------------------------------------------------------- today view --- */
 
@@ -114,14 +169,16 @@ function renderLive() {
   }
 }
 
-async function refreshLive({ quiet = false } = {}) {
+async function refreshLive({ quiet = false, force = false } = {}) {
   if (!state.routes.length) { state.results = []; renderLive(); return; }
   if (!quiet) status('Checking traffic…');
   try {
-    const { results } = await api('/api/check');
-    state.results = results;
+    const data = await api(`/api/check${force ? '?force=1' : ''}`);
+    state.results = data.results;
+    if (data.usage) state.usage = data.usage;
     renderLive();
-    if (!quiet) status(`Updated ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`, 'good');
+    const at = new Date(data.checkedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    if (!quiet) status(data.cached ? `As of ${at} (cached)` : `Updated ${at}`, 'good');
   } catch (err) {
     status(err.message, 'err');
   }
@@ -310,7 +367,6 @@ function fillSettings(s) {
   $('#set-threshold').value = String(s.delayThreshold);
   $('#set-quiet').checked = s.quietOk;
   $('#set-units').value = s.units;
-  $('#set-enabled').checked = s.enabled;
   daysSelected = s.days;
   renderDays();
   renderDiagnostics();
@@ -319,11 +375,16 @@ function fillSettings(s) {
 async function renderDiagnostics() {
   const s = state.settings;
   const lines = [
-    `Alerts ${s.enabled ? 'on' : 'off'} · ${s.windowStart}–${s.windowEnd} ${s.tz}`,
+    s.paused
+      ? `Alerts paused until ${new Date(s.snoozeUntil).toLocaleDateString([], DATE_FMT)}`
+      : `Alerts ${s.enabled ? 'on' : 'off'} · ${s.windowStart}–${s.windowEnd} ${s.tz}`,
     `Days: ${s.days.map((d) => DAY_LABELS[d - 1]).join(', ') || 'none'}`,
     `Push subscription: ${s.subscribed ? 'registered' : 'not registered'}`,
     `Installed to Home Screen: ${isStandalone() ? 'yes' : 'no'}`,
     s.lastStatus ? `Last run: ${s.lastStatus}` : 'Last run: not yet',
+    state.usage
+      ? `Traffic API today: ${state.usage.used} of ${state.usage.limit} calls (resets 00:00 UTC)`
+      : 'Traffic API today: unknown',
   ];
   try {
     const health = await api('/api/health', { auth: false });
@@ -346,11 +407,11 @@ async function saveSettings() {
         delayThreshold: Number($('#set-threshold').value),
         quietOk: $('#set-quiet').checked,
         units: $('#set-units').value,
-        enabled: $('#set-enabled').checked,
       },
     });
     state.settings = settings;
     fillSettings(settings);
+    renderMaster();
     status('Settings saved', 'good');
   } catch (err) {
     status(err.message, 'err');
@@ -440,7 +501,9 @@ async function loadState() {
   const data = await api('/api/state');
   state.settings = data.settings;
   state.routes = data.routes;
+  state.usage = data.usage || state.usage;
   fillSettings(data.settings);
+  renderMaster();
   renderRoutes();
   renderAlertState(await pushState());
 }
@@ -455,7 +518,31 @@ function wireEvents() {
   for (const button of document.querySelectorAll('.tabbtn')) {
     button.addEventListener('click', () => showTab(button.dataset.tab));
   }
-  $('#refresh').addEventListener('click', () => refreshLive());
+  $('#refresh').addEventListener('click', () => refreshLive({ force: true }));
+
+  $('#master-toggle').addEventListener('click', () => {
+    const on = $('#master-toggle').getAttribute('aria-checked') === 'true';
+    // Switching on also lifts any holiday pause.
+    patchSettings({ enabled: !on, ...(on ? {} : { snoozeUntil: null }) },
+      on ? 'Morning alerts off' : 'Morning alerts on');
+  });
+  $('#resume').addEventListener('click', () => patchSettings({ snoozeUntil: null, enabled: true }, 'Alerts resumed'));
+  for (const button of document.querySelectorAll('.pauses button')) {
+    button.addEventListener('click', () => {
+      if (button.dataset.pause !== 'custom') { pauseFor(Number(button.dataset.pause)); return; }
+      const picker = $('#pause-date');
+      picker.hidden = false;
+      picker.min = localMidnightIn(1).toISOString().slice(0, 10);
+      picker.showPicker?.() ?? picker.focus();
+    });
+  }
+  $('#pause-date').addEventListener('change', (event) => {
+    if (!event.target.value) return;
+    const until = new Date(`${event.target.value}T00:00:00`);   // local midnight
+    $('#pause-date').hidden = true;
+    patchSettings({ snoozeUntil: until.toISOString(), enabled: true },
+      `Paused until ${until.toLocaleDateString([], DATE_FMT)}`);
+  });
   $('#add-route').addEventListener('click', () => openEditor(null));
   $('#save-route').addEventListener('click', saveRoute);
   $('#add-waypoint').addEventListener('click', () => {

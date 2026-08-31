@@ -31,6 +31,23 @@
 
 <main id="tab-today" class="tab">
   <div id="status" class="status" hidden></div>
+
+  <section class="card" id="master-card">
+    <div class="switch-row">
+      <div>
+        <h2>Morning alerts</h2>
+        <p id="master-sub" class="muted small">…</p>
+      </div>
+      <button id="master-toggle" class="switch" type="button" role="switch" aria-checked="true" aria-label="Morning alerts"><span></span></button>
+    </div>
+    <div class="row pauses">
+      <button data-pause="7" type="button">Pause 1 wk</button>
+      <button data-pause="14" type="button">2 wks</button>
+      <button data-pause="custom" type="button">Until…</button>
+    </div>
+    <input id="pause-date" type="date" hidden>
+    <button id="resume" class="ghost wide" type="button" hidden>Resume alerts now</button>
+  </section>
   <div id="routes-live" class="stack"></div>
   <p id="empty-live" class="muted center" hidden>No routes yet. Open <b>Routes</b> to add one.</p>
 
@@ -78,7 +95,6 @@
     <label class="field"><span>Units</span>
       <select id="set-units"><option value="imperial">Miles</option><option value="metric">Kilometres</option></select>
     </label>
-    <label class="check"><input id="set-enabled" type="checkbox" checked><span>Morning alerts on</span></label>
   </section>
 
   <section class="card">
