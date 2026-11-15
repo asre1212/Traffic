@@ -1,6 +1,6 @@
 // Service worker: offline shell + the push handler that draws the lock-screen alert.
 
-const CACHE = 'commute-v1';
+const CACHE = 'commute-v2';
 const SHELL = ['/', '/index.html', '/app.js', '/styles.css', '/manifest.webmanifest',
   '/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-180.png'];
 const TAG = 'commute';
@@ -11,7 +11,7 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
-    for (const key of await caches.keys()) if (key !== CACHE) await caches.delete(key);
+    for (const key of await caches.keys()) if (key.startsWith("commute-") && key !== CACHE) await caches.delete(key);
     await self.clients.claim();
   })());
 });
